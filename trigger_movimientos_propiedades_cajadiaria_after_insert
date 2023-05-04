@@ -1,0 +1,74 @@
+BEGIN
+
+DECLARE Qgrupo, QimporteMovCaja, QpropiedadMov, Qtipo, ULTIMA_PLANILLA, ABIERTA, Qid_caja, Qid_planilla, QnroMov, Qpropietario INTEGER(11);
+DECLARE Qingreso, Qegreso, Qporcentaje DECIMAL(15,2);
+DECLARE Qusuario VARCHAR(30);
+DECLARE Qingresa_egresa, done TINYINT(1);
+ 
+
+DECLARE cursor_propietarios CURSOR FOR
+SELECT pp.id_propietario, pp.porcentaje_propiedad, p.ultima_planilla
+FROM propiedades_propietarios pp
+INNER JOIN propietarios p ON p.id = pp.id_propietario
+WHERE pp.id_propiedad = NEW.id_propiedad;
+
+DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+
+OPEN cursor_propietarios;
+
+read_loop: LOOP
+FETCH cursor_propietarios INTO Qpropietario, Qporcentaje, ULTIMA_PLANILLA;
+IF done THEN
+    LEAVE read_loop;
+END IF;
+
+SELECT cd.importe, mpc.id_propiedad, cd.id, cd.usuario, cd.nromov, cd.ingreso, pla.abierta, pla.id
+FROM cajadiaria cd
+INNER JOIN movimientos_propiedades_cajadiaria mpc ON mpc.id_mov =  cd.id
+INNER JOIN propiedades_propietarios pp ON pp.id_propiedad = mpc.id_propiedad AND pp.id_propietario = Qpropietario
+INNER JOIN propietarios_planilla pla ON pla.id_propietario = pp.id_propietario AND pla.ult_planilla = ULTIMA_PLANILLA
+WHERE mpc.id_propiedad = NEW.id_propiedad AND pp.id_propietario = Qpropietario
+ORDER BY mpc.id DESC
+LIMIT 1   
+INTO QimporteMovCaja, QpropiedadMov, Qid_caja, Qusuario, QnroMov, Qingresa_egresa, ABIERTA, Qid_planilla;
+
+IF NOT ISNULL(QpropiedadMov) and QpropiedadMov = NEW.id_propiedad THEN
+   
+	IF Qingresa_egresa = 1 AND QimporteMovCaja > 0 THEN
+      	SET Qtipo = 3;
+      	SET Qingreso = QimporteMovCaja  * (Qporcentaje / 100);
+           						   				
+			INSERT INTO 
+         `propietarios_planilla_detalle` 	
+         ( `id_planilla`, `tipo`,`importe`,  interes, `fecmovim`, `usuario`,`id_caja`)
+         VALUES
+         (Qid_planilla, Qtipo, Qingreso, 0, CURRENT_TIMESTAMP(), Qusuario, Qid_caja);
+						
+	      UPDATE propietarios_planilla
+	      SET ingresos = ingresos + Qingreso
+	      WHERE ult_planilla = ULTIMA_PLANILLA;
+	      
+   END IF;
+        
+	IF Qingresa_egresa = 0  AND QimporteMovCaja > 0 THEN
+	      SET Qtipo = 4;
+	      SET Qegreso = QimporteMovCaja  * (Qporcentaje / 100);
+	            
+	      INSERT INTO 
+	      `propietarios_planilla_detalle` 	
+	      ( `id_planilla`, `tipo`,`importe`, interes, `fecmovim`, `usuario`,`id_caja`)
+	      VALUES
+	      (Qid_planilla, Qtipo, Qegreso, 0, CURRENT_TIMESTAMP(), Qusuario, Qid_caja);
+						
+	      UPDATE propietarios_planilla
+	      SET gastos = gastos + Qegreso
+	      WHERE ult_planilla = ULTIMA_PLANILLA;				
+	END IF;
+
+END IF;			
+
+END LOOP;
+
+CLOSE cursor_propietarios;
+
+END
