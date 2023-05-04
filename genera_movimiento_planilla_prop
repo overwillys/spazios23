@@ -1,0 +1,253 @@
+BEGIN
+    
+DECLARE Qid_deuda, SumaImportes, SumComision, ComisionTotal INTEGER(11);
+DECLARE Qcancela TINYINT(1);
+DECLARE Qefectivo, Qdeposito, Qcheque, Qretencion DECIMAL(18,2);
+DECLARE Qefectivo_parcial, Qdeposito_parcial, Qdeposito_prop_parcial, Qcheque_parcial, Qretencion_parcial DECIMAL(18,2);
+DECLARE Qimporte, Qinteres, Qimpo_honorarios_o_depositos, Cobranza_de DECIMAL(18,2);
+DECLARE Qcomision_parcial, Qhonorario_parcial DECIMAL(18,2);
+DECLARE Si_transfer TINYINT(4);
+DECLARE Qperiodo DATE;
+DECLARE Qtipmov TINYINT(4);
+DECLARE Qpropiedad INTEGER(11);
+DECLARE Qcomision, Qcomision2 DECIMAL(5, 2);
+DECLARE Qid_caja INTEGER(11);
+DECLARE Qfecaja DATE;
+DECLARE Qid_propietario INTEGER(11);
+DECLARE Qporcentaje_propiedad DECIMAL(7, 4);
+DECLARE Qult_planilla INTEGER(11);
+DECLARE Qid_planilla INTEGER(11);
+DECLARE planilla_abierta TINYINT(1);
+DECLARE Qid_planilla_detalle INTEGER(11) DEFAULT 0;
+DECLARE done TINYINT DEFAULT 0;
+DECLARE resultado, Queda_en_inmobiliaria TINYINT(1) DEFAULT 0;
+DECLARE AUX_TIPMOV TINYINT(4);
+
+    
+ /* PARAMETROS 
+ 
+ 	1 -  Qid_comprobante_pago = es el id del cliente_comprobantes_pago  que proviene del after_update de work_cobranzas_detalle
+ 	2 -   Qid_pago =  es el id del clientes_comprobantes
+ */   
+    
+    
+DECLARE cursor_propietarios CURSOR 
+FOR SELECT pp.id_propietario, pp.porcentaje_propiedad, p.ultima_planilla
+	FROM propiedades_propietarios pp
+    	INNER JOIN propietarios p ON p.id = pp.`id_propietario`
+    WHERE pp.id_propiedad = Qpropiedad;
+
+DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+	
+/* traemos datos de la deuda en clientes pagos ; edit: se cambio en el where el "id" por "Qid_pago"*/ 
+
+
+SELECT id_deuda, cancela, efectivo, deposito, cheque, retencion, transfer_a
+FROM `clientes_comprobantes_pagos` ccp
+INNER JOIN clientes_comprobantes cli ON cli.id = ccp.id_deuda
+WHERE ccp.id = Qid_comprobante_pago
+INTO Qid_deuda, Qcancela, Qefectivo, Qdeposito, Qcheque, Qretencion, Si_transfer;
+
+    
+/* traemos datos de la caja que realiza el cobro */
+SELECT cd.id, cd.fecaja
+FROM cajadiaria cd
+	INNER JOIN `clientes_comprobantes_pagos_cajadiaria` ccpcd ON ccpcd.`id_cajadiaria` = cd.id
+WHERE ccpcd.`id_codpago` = Qid_pago
+LIMIT 1
+INTO Qid_caja, Qfecaja;
+
+/* traigo datos de la propiedad por medio de clientes comprobantes e operaciones inmobiliarias */
+SELECT cc.periodo, cc.tipmov, p.comision, p.`comision2`, cc.importe, oi.depo_en_inmobiliaria, oi.id_propiedad
+FROM clientes_comprobantes cc
+  INNER JOIN `operaciones_inmobiliarias` oi ON oi.id = cc.`id_operacion`
+  INNER JOIN propiedades p ON p.id = oi.`id_propiedad`
+WHERE cc.id = Qid_deuda
+LIMIT 1
+INTO Qperiodo, Qtipmov, Qcomision, Qcomision2, Qimpo_honorarios_o_depositos, Queda_en_inmobiliaria, Qpropiedad;
+
+/*  si es un importe de honorarios entonces */
+
+SET ComisionTotal  = TRUNCATE((Qefectivo + Qdeposito + Qcheque + Qretencion) * ( (Qcomision + Qcomision2) / 100), 2); 
+
+OPEN cursor_propietarios;
+  SET done = FALSE;
+    propietarios_loop:LOOP
+    FETCH cursor_propietarios INTO Qid_propietario, Qporcentaje_propiedad, Qult_planilla;
+  IF done	THEN
+  	LEAVE propietarios_loop;
+  END IF;
+       
+/* seteo de variables para parciales de dinero */   
+		
+  SET Qimporte = 0;
+  SET Qinteres = 0; 
+  SET Qefectivo_parcial = 0;
+  SET Qdeposito_parcial = 0;
+  SET Qcheque_parcial = 0;
+  SET Qretencion_parcial = 0;
+  SET Qcomision_parcial = 0;
+  SET Qdeposito_prop_parcial = 0;
+  SET Qid_planilla = NULL;
+  SET planilla_abierta = 0;
+                     
+  SELECT id, abierta
+  FROM propietarios_planilla
+  WHERE ult_planilla = Qult_planilla AND id_propietario = Qid_propietario
+  LIMIT 1
+  INTO Qid_planilla, planilla_abierta;
+
+  IF  ISNULL(Qid_planilla) OR planilla_abierta = 0 THEN 
+      SET Qult_planilla = Qult_planilla + 1;
+      
+      UPDATE propietarios
+      SET ultima_planilla = Qult_planilla
+      WHERE id = Qid_propietario;
+
+	
+	 INSERT INTO 
+          `propietarios_planilla`  
+         (
+          id_propietario, ult_planilla, id_propiedad, `importe_cobranza`,`efectivo`,`deposito`,`retencion`,`cheque`, usuario, honorarios, `comisiones`
+          )
+        VALUES
+        (Qid_propietario, Qult_planilla, Qpropiedad, Qimporte,  Qefectivo, Qdeposito, Qretencion, Qcheque, Qusuario, 0, ComisionTotal);
+        
+      SELECT LAST_INSERT_ID() INTO Qid_planilla;
+                  
+  END IF;
+
+	/* DECLARO VARIBALES PARA PARCIALES Y DEMAS...*/
+	SET Qefectivo_parcial = TRUNCATE((Qefectivo * (Qporcentaje_propiedad / 100)), 2);
+   SET Qdeposito_parcial = TRUNCATE((Qdeposito * (Qporcentaje_propiedad / 100)), 2);
+   SET Qcheque_parcial = TRUNCATE((Qcheque * (Qporcentaje_propiedad / 100)), 2);
+   SET Qretencion_parcial = TRUNCATE((Qretencion * (Qporcentaje_propiedad / 100)), 2);
+   SET Qcomision_parcial = TRUNCATE((Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial) * ((Qcomision + Qcomision2) / 100), 2);
+
+	
+	IF Si_transfer = 1	THEN
+      SET Qdeposito_prop_parcial = Qdeposito_parcial;
+      SET Qdeposito_parcial = 0;
+   END IF;
+   
+   /* SI EXISTE DEPOSITO DE GARANTIA PARA EL PROPIETARIO, ENTONCES DEBERA EXISTIR EL TIPMOV 10 
+		si es 0 se queda en la inmobiliaria, y si es 1 se lo queda el locador
+	*/
+
+/*1: alquiler
+2: expensa
+3: ingreso
+4: gasto
+5: honorarios*/
+
+/* TENER EN CUENTA DE CAMBIAR EL AUX_TIPMOV A DEPOSITO DE GARANTIA , SI ES QUE EXISTE LA DISCRIMINACIÓN DEL MISMO. HOY SERÁ ...1 */
+  IF Queda_en_inmobiliaria = 0 then
+  			
+  		/* PARA USAR EL TIPMOV SEGUN EL TIPO DE COBRANZA */
+			SET AUX_TIPMOV = 
+			   CASE 
+			      WHEN Qtipmov = 11 THEN 5
+			      WHEN Qtipmov = 10 THEN 1
+			      WHEN Qtipmov IN (1, 3, 4, 6) THEN 1
+			      ELSE 2
+			END;
+			
+			if ( AUX_TIPMOV = 5 ) THEN # CUANDO VIENE HONORARIOS
+   			SET Qcomision_parcial = 0;
+   		END if;
+							
+	  		IF Qtipmov IN (1, 3, 4, 6, 11)	THEN
+		
+				SELECT ppd.id
+		      FROM `propietarios_planilla_detalle` ppd
+		      	INNER JOIN `propietarios_planilla` pp ON pp.id = ppd.`id_planilla`
+		      WHERE pp.`ult_planilla` = Qult_planilla AND ppd.`periodo` = Qperiodo AND ppd.tipo = 1 AND ppd.id_caja = Qid_caja
+		      LIMIT 1
+		      INTO Qid_planilla_detalle;
+		         
+		         
+			   IF NOT ISNULL(Qid_planilla_detalle) THEN
+				  		SET Qinteres = IF(Qtipmov = 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0);
+				  		SET Qimporte = IF(Qtipmov != 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0);
+			  			INSERT INTO `propietarios_planilla_detalle` (id_planilla, tipo, importe, interes, comision, fecmovim, usuario, ingreso, efectivo, deposito, deposito_prop, cheque, retencion, periodo, id_caja, id_comprobante) 
+						VALUES (Qid_planilla, AUX_TIPMOV, Qimporte, Qinteres, Qcomision_parcial, CURRENT_TIMESTAMP, Qusuario, 1, Qefectivo_parcial, Qdeposito_parcial, Qdeposito_prop_parcial, Qcheque_parcial, Qretencion_parcial, Qperiodo, Qid_caja, Qid_pago);
+				ELSE
+			  			UPDATE `propietarios_planilla_detalle` 
+						  SET importe = importe + IF(Qtipmov != 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0), 
+						  		interes = interes + IF(Qtipmov = 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0), comision = comision + Qcomision_parcial, efectivo = efectivo + Qefectivo_parcial, deposito = deposito + Qdeposito_parcial, deposito_prop = deposito_prop + Qdeposito_prop_parcial, cheque = cheque + Qcheque_parcial, retencion = retencion + Qretencion_parcial 
+						WHERE id = Qid_planilla_detalle;
+				END IF;
+		   END if;
+		    
+  ELSE	
+  
+  		/* PARA USAR EL TIPMOV SEGUN EL TIPO DE COBRANZA */
+			SET AUX_TIPMOV = 
+			   CASE 
+			      WHEN Qtipmov = 11 THEN 5
+			      WHEN Qtipmov = 10 THEN 1
+			      WHEN Qtipmov IN (1, 3, 4, 6) THEN 1
+			      ELSE 2
+			END;
+			
+			if ( AUX_TIPMOV = 5 ) THEN # CUANDO VIENE HONORARIOS
+   			SET Qcomision_parcial = 0;
+   		END if;
+  
+ 		 
+ 		IF Qtipmov IN (1, 3, 4, 6, 10, 11)	THEN
+
+				SELECT ppd.id
+		      FROM `propietarios_planilla_detalle` ppd
+		      	INNER JOIN `propietarios_planilla` pp ON pp.id = ppd.`id_planilla`
+		      WHERE pp.`ult_planilla` = Qult_planilla AND ppd.`periodo` = Qperiodo AND ppd.tipo = 1 AND ppd.id_caja = Qid_caja
+		      LIMIT 1
+		      INTO Qid_planilla_detalle;
+		         
+		         
+			   IF NOT ISNULL(Qid_planilla_detalle) THEN
+				  		SET Qinteres = IF(Qtipmov = 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0);
+				  		SET Qimporte = IF(Qtipmov != 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0);
+			  			INSERT INTO `propietarios_planilla_detalle` (cancela, id_planilla, tipo, importe, interes, comision, fecmovim, usuario, ingreso, efectivo, deposito, deposito_prop, cheque, retencion, periodo, id_caja, id_comprobante) 
+						VALUES (Qcancela, Qid_planilla, AUX_TIPMOV, Qimporte, Qinteres, Qcomision_parcial, CURRENT_TIMESTAMP, Qusuario, 1, Qefectivo_parcial, Qdeposito_parcial, Qdeposito_prop_parcial, Qcheque_parcial, Qretencion_parcial, Qperiodo, Qid_caja, Qid_pago);
+				ELSE
+			  			UPDATE `propietarios_planilla_detalle` 
+						  SET importe = importe + IF(Qtipmov != 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0), 
+						  		interes = interes + IF(Qtipmov = 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0), comision = comision + Qcomision_parcial, efectivo = efectivo + Qefectivo_parcial, deposito = deposito + Qdeposito_parcial, deposito_prop = deposito_prop + Qdeposito_prop_parcial, cheque = cheque + Qcheque_parcial, retencion = retencion + Qretencion_parcial 
+						WHERE id = Qid_planilla_detalle;
+				END IF;
+				
+  		ELSE IF Qtipmov IN (5, 8, 9)	THEN
+      
+				SELECT ppd.id
+		      FROM `propietarios_planilla_detalle` ppd
+		      INNER JOIN `propietarios_planilla` pp ON pp.id = ppd.`id_planilla`
+		      WHERE pp.`ult_planilla` = Qult_planilla AND ppd.`periodo` = Qperiodo AND ppd.tipo = 2
+		      LIMIT 1
+		      INTO Qid_planilla_detalle;
+      
+      
+		      IF Qid_planilla_detalle != 0	THEN
+		      	SET Qinteres = IF(Qtipmov = 9, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0);
+		      	SET Qimporte = IF(Qtipmov != 9, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0);
+		      	
+		        	INSERT INTO `propietarios_planilla_detalle` 
+					  		(cancela, id_planilla, tipo, importe, interes, comision, fecmovim, usuario, ingreso, efectivo, deposito, deposito_prop, cheque, retencion, periodo, id_caja, id_comprobante) 
+					  VALUES (Qcancela, Qid_planilla, AUX_TIPMOV, Qimporte, Qinteres, Qcomision_parcial, CURRENT_TIMESTAMP, Qusuario, 1, Qefectivo_parcial, Qdeposito_parcial, Qdeposito_prop_parcial, Qcheque_parcial, Qretencion_parcial, Qperiodo, Qid_caja, Qid_pago);
+		      ELSE
+		       	UPDATE `propietarios_planilla_detalle` SET importe = importe + IF(Qtipmov != 9, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0), interes = interes + IF(Qtipmov = 6, Qefectivo_parcial + Qdeposito_parcial + Qcheque_parcial + Qretencion_parcial + Qdeposito_prop_parcial, 0), comision = comision + Qcomision_parcial, efectivo = efectivo + Qefectivo_parcial, deposito = deposito + Qdeposito_parcial, deposito_prop = deposito_prop + Qdeposito_prop_parcial, cheque = cheque + Qcheque_parcial, retencion = retencion + Qretencion_parcial WHERE id = Qid_planilla_detalle;
+		      END IF;
+   	END IF;
+   END IF; 
+END IF;
+  
+        
+END LOOP;
+
+
+CLOSE cursor_propietarios;
+    
+    SET resultado = 1;
+    
+ 	RETURN resultado;
+END
